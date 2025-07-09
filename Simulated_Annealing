@@ -1,0 +1,123 @@
+import pandas as pd
+import numpy as np
+import random
+import matplotlib.pyplot as plt
+
+# Load the uploaded datasets
+solar_df = pd.read_csv("E:/Solar and Wind Integration/Third paper/solar_panel_power_output.csv")
+wind_df = pd.read_csv("E:/Solar and Wind Integration/Third paper/wind_turbine_output.csv")
+
+# Constants
+T_ref, G_ref, R, r_s = 25, 1000, 0.700, 18.15
+k_V, k_I, eta, rho = -0.24, 0.04, 0.3, 1.225
+
+# Objective functions
+def P_SOLAR(V_oc, I_sc, G_theta, T):
+    V_adj = V_oc - k_V * (T - T_ref)
+    I_adj = I_sc * (G_theta / G_ref) * (1 + k_I * (T - T_ref))
+    return V_adj * I_adj * (R / (R + r_s))
+
+def P_WIND(v, D, H, L):
+    return 4 * eta * 0.5 * rho * (v**3) * D * (H - (L / 2))
+
+def P_TOTAL(position: np.ndarray, solar_row, wind_row) -> float:
+    V_oc, I_sc = position[0], position[1]
+    G_theta, T = solar_row['G_theta'], solar_row['T']
+    v, D, H, L = wind_row['v'], wind_row['D'], wind_row['H'], wind_row['L']
+    return -1 * (P_SOLAR(V_oc, I_sc, G_theta, T) + P_WIND(v, D, H, L))  # Negate for minimization
+
+# SA Parameters
+bounds = [(70, 100), (1, 20)]  # (V_oc, I_sc)
+max_iterations = 1000
+initial_temp = 1000
+cooling_rate = 0.95
+epsilon = 1e-3  # convergence threshold
+
+# Storage
+sa_results = []
+convergence_data = []
+
+# SA optimization loop
+for idx, (solar_row, wind_row) in enumerate(zip(solar_df.itertuples(index=False), wind_df.itertuples(index=False))):
+    solar_series = pd.Series(solar_row._asdict())
+    wind_series = pd.Series(wind_row._asdict())
+
+    current_solution = np.array([random.uniform(*bounds[0]), random.uniform(*bounds[1])])
+    current_score = P_TOTAL(current_solution, solar_series, wind_series)
+    best_solution = current_solution.copy()
+    best_score = current_score
+    temp = initial_temp
+
+    curve = []
+
+    for _ in range(max_iterations):
+        candidate = current_solution + np.random.uniform(-1, 1, 2)
+        for d in range(2):
+            candidate[d] = np.clip(candidate[d], bounds[d][0], bounds[d][1])
+
+        candidate_score = P_TOTAL(candidate, solar_series, wind_series)
+        delta = candidate_score - current_score
+
+        if delta < 0 or np.exp(-delta / temp) > random.random():
+            current_solution = candidate
+            current_score = candidate_score
+            if candidate_score < best_score:
+                best_score = candidate_score
+                best_solution = candidate.copy()
+
+        temp *= cooling_rate
+        curve.append(-best_score)  # Convert back to positive for graph
+
+    # Append detailed result
+    sa_results.append({
+        "Row_Index": idx,
+        "V_oc_opt": best_solution[0],
+        "I_sc_opt": best_solution[1],
+        "G_theta": solar_series['G_theta'],
+        "T": solar_series['T'],
+        "v": wind_series['v'],
+        "D": wind_series['D'],
+        "H": wind_series['H'],
+        "L": wind_series['L'],
+        "Max_P_TOTAL": -best_score
+    })
+
+    # Print summary for this row
+    print(f"[Row {idx}] → V_oc*: {best_solution[0]:.2f}, I_sc*: {best_solution[1]:.2f} | "
+          f"G_theta: {solar_series['G_theta']}, T: {solar_series['T']} | "
+          f"v: {wind_series['v']}, D: {wind_series['D']}, H: {wind_series['H']}, L: {wind_series['L']} "
+          f"→ Max P_TOTAL: {-best_score:.2f} W")
+
+    convergence_data.append(curve)
+
+# Store DataFrame
+sa_df = pd.DataFrame(sa_results)
+sa_df.to_csv("sa_optimization_results.csv", index=False)
+
+# Compute average convergence curve
+average_curve = np.mean(convergence_data, axis=0)
+
+# Determine convergence iteration
+converged_at = len(average_curve) - 1
+for i in range(1, len(average_curve)):
+    if abs(average_curve[i] - average_curve[i - 1]) < epsilon:
+        converged_at = i
+        break
+
+# Plot convergence with annotation
+plt.figure(figsize=(10, 6))
+plt.plot(average_curve, label='Average SA Convergence', linewidth=2)
+plt.axvline(x=converged_at, color='red', linestyle='--', label=f'Converged at Iteration {converged_at}')
+plt.text(converged_at + 5, average_curve[converged_at], f'Iteration {converged_at}', color='red', fontsize=10)
+plt.title("Average Simulated Annealing Convergence Over Dataset")
+plt.xlabel("Iteration")
+plt.ylabel("Total Power Output (W)")
+plt.grid(True)
+plt.legend()
+plt.tight_layout()
+plt.savefig("sa_SW3.svg", format="svg")
+plt.show()
+# Store DataFrame
+sa_df = pd.DataFrame(sa_results)
+sa_df.to_csv("sa_optimization_results.csv", index=False)
+sa_df.to_excel("sa_optimization_results.xlsx", index=False)  # Save to Excel
