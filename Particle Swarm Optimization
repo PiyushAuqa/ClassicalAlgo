@@ -1,0 +1,107 @@
+import pandas as pd
+import numpy as np
+import random
+from typing import Tuple
+import matplotlib.pyplot as plt
+
+# Load the uploaded datasets
+solar_df = pd.read_csv("E:/Solar and Wind Integration/Third paper/solar_panel_power_output.csv")
+wind_df = pd.read_csv("E:/Solar and Wind Integration/Third paper/wind_turbine_output.csv")
+
+# Display sample rows for verification
+#solar_df.head(), wind_df.head()
+
+# Constants
+T_ref, G_ref, R, r_s = 25, 1000, 0.700, 18.15
+k_V, k_I, eta, rho = -0.24, 0.04, 0.3, 1.225
+
+# Objective functions
+def P_SOLAR(V_oc, I_sc, G_theta, T):
+    V_adj = V_oc - k_V * (T - T_ref)
+    I_adj = I_sc * (G_theta / G_ref) * (1 + k_I * (T - T_ref))
+    return V_adj * I_adj * (R / (R + r_s))
+
+def P_WIND(v, D, H, L):
+    return 4 * eta * 0.5 * rho * (v**3) * D * (H - (L / 2))
+
+def P_TOTAL(position: np.ndarray, solar_row, wind_row) -> float:
+    V_oc, I_sc = position[0], position[1]
+    G_theta, T = solar_row['G_theta'], solar_row['T']
+    v, D, H, L = wind_row['v'], wind_row['D'], wind_row['H'], wind_row['L']
+    return -1 * (P_SOLAR(V_oc, I_sc, G_theta, T) + P_WIND(v, D, H, L))  # Negate for minimization
+
+# PSO parameters
+num_particles = 30
+num_iterations = 100
+inertia_weight = 0.5
+cognitive_coeff = 1.5
+social_coeff = 1.5
+bounds = [(70, 100), (1, 20)]  # (V_oc, I_sc)
+
+# Run PSO for entire dataset
+pso_results = []
+convergence_data = []
+
+# Optional: Reduce data size for quicker test
+# solar_df = solar_df.head(100)
+# wind_df = wind_df.head(100)
+
+for solar_row, wind_row in zip(solar_df.itertuples(index=False), wind_df.itertuples(index=False)):
+    # Initialize particles
+    particles = [np.array([random.uniform(*bounds[0]), random.uniform(*bounds[1])]) for _ in range(num_particles)]
+    velocities = [np.zeros(2) for _ in range(num_particles)]
+    personal_best_positions = particles.copy()
+    personal_best_scores = [float('inf')] * num_particles
+    global_best_position = None
+    global_best_score = float('inf')
+    curve = []
+
+    # Convert namedtuples to Series
+    solar_series = pd.Series(solar_row._asdict())
+    wind_series = pd.Series(wind_row._asdict())
+
+    # PSO iterations
+    for _ in range(num_iterations):
+        for i in range(num_particles):
+            score = P_TOTAL(particles[i], solar_series, wind_series)
+            if score < personal_best_scores[i]:
+                personal_best_scores[i] = score
+                personal_best_positions[i] = particles[i].copy()
+            if score < global_best_score:
+                global_best_score = score
+                global_best_position = particles[i].copy()
+
+        for i in range(num_particles):
+            r1, r2 = random.random(), random.random()
+            cognitive = cognitive_coeff * r1 * (personal_best_positions[i] - particles[i])
+            social = social_coeff * r2 * (global_best_position - particles[i])
+            velocities[i] = inertia_weight * velocities[i] + cognitive + social
+            particles[i] += velocities[i]
+            for d in range(2):
+                particles[i][d] = max(bounds[d][0], min(bounds[d][1], particles[i][d]))
+
+        curve.append(-global_best_score)
+
+    pso_results.append({
+        "V_oc": global_best_position[0],
+        "I_sc": global_best_position[1],
+        "Max_P_TOTAL": -global_best_score
+    })
+    convergence_data.append(curve)
+
+# Convert to DataFrame
+pso_df = pd.DataFrame(pso_results)
+pso_df.to_csv("pso_optimization_results.csv", index=False)
+
+# Plot average convergence curve
+average_curve = np.mean(convergence_data, axis=0)
+plt.figure(figsize=(10, 6))
+plt.plot(average_curve, label='Average PSO Convergence', linewidth=2)
+plt.title("Average PSO Convergence Over Dataset")
+plt.xlabel("Iteration")
+plt.ylabel("Total Power Output (W)")
+plt.grid(True)
+plt.legend()
+plt.tight_layout()
+plt.savefig("pso_SW1.svg", format="svg")
+plt.show()
