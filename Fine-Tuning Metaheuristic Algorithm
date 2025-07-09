@@ -1,0 +1,146 @@
+import pandas as pd
+import numpy as np
+import random
+import matplotlib.pyplot as plt
+
+# Load datasets
+solar_df = pd.read_csv("E:/Solar and Wind Integration/Third paper/solar_panel_power_output.csv")
+wind_df = pd.read_csv("E:/Solar and Wind Integration/Third paper/wind_turbine_output.csv")
+
+# Constants
+T_ref, G_ref, R, r_s = 25, 1000, 0.700, 18.15
+k_V, k_I, eta, rho = -0.24, 0.04, 0.3, 1.225
+
+# Objective Functions
+def P_SOLAR(V_oc, I_sc, G_theta, T):
+    V_adj = V_oc - k_V * (T - T_ref)
+    I_adj = I_sc * (G_theta / G_ref) * (1 + k_I * (T - T_ref))
+    return V_adj * I_adj * (R / (R + r_s))
+
+def P_WIND(v, D, H, L):
+    return 4 * eta * 0.5 * rho * (v**3) * D * (H - (L / 2))
+
+def P_TOTAL(position: np.ndarray, solar_row, wind_row) -> float:
+    V_oc, I_sc = position[0], position[1]
+    G_theta, T = solar_row['G_theta'], solar_row['T']
+    v, D, H, L = wind_row['v'], wind_row['D'], wind_row['H'], wind_row['L']
+    return -1 * (P_SOLAR(V_oc, I_sc, G_theta, T) + P_WIND(v, D, H, L))  # Negate for minimization
+
+# FTMA Parameters
+bounds = [(70, 100), (1, 20)]
+pop_size = 20
+n_generations = 100
+mutation_strength = 0.3
+fine_tune_steps = 10
+fine_tune_radius = 0.05
+
+# Storage
+ftma_results = []
+convergence_data = []
+
+for idx, (solar_row, wind_row) in enumerate(zip(solar_df.itertuples(index=False), wind_df.itertuples(index=False))):
+    solar_series = pd.Series(solar_row._asdict())
+    wind_series = pd.Series(wind_row._asdict())
+
+    # Initialize population
+    population = [np.array([random.uniform(*bounds[0]), random.uniform(*bounds[1])]) for _ in range(pop_size)]
+    fitness = [P_TOTAL(ind, solar_series, wind_series) for ind in population]
+    best_idx = np.argmin(fitness)
+    best_solution = population[best_idx].copy()
+    best_score = fitness[best_idx]
+
+    curve = []
+
+    for gen in range(n_generations):
+        new_population = []
+
+        for i in range(pop_size):
+            ind = population[i].copy()
+
+            # Mutation: small random noise
+            mutant = ind + mutation_strength * np.random.uniform(-1, 1, size=2)
+
+            # Recombination: with best solution
+            recombined = 0.5 * (mutant + best_solution)
+
+            # Bound check
+            for d in range(2):
+                recombined[d] = np.clip(recombined[d], bounds[d][0], bounds[d][1])
+
+            new_population.append(recombined)
+
+        # Evaluate new population
+        new_fitness = [P_TOTAL(ind, solar_series, wind_series) for ind in new_population]
+
+        # Combine and select top individuals
+        combined = population + new_population
+        combined_fitness = fitness + new_fitness
+        sorted_idx = np.argsort(combined_fitness)
+        population = [combined[i] for i in sorted_idx[:pop_size]]
+        fitness = [combined_fitness[i] for i in sorted_idx[:pop_size]]
+
+        # Update best
+        current_best_idx = np.argmin(fitness)
+        if fitness[current_best_idx] < best_score:
+            best_score = fitness[current_best_idx]
+            best_solution = population[current_best_idx].copy()
+
+        curve.append(-best_score)  # Convert to positive
+
+    # Fine-tuning around best solution
+    for _ in range(fine_tune_steps):
+        candidate = best_solution + fine_tune_radius * np.random.uniform(-1, 1, size=2)
+        for d in range(2):
+            candidate[d] = np.clip(candidate[d], bounds[d][0], bounds[d][1])
+        candidate_score = P_TOTAL(candidate, solar_series, wind_series)
+        if candidate_score < best_score:
+            best_score = candidate_score
+            best_solution = candidate.copy()
+        curve.append(-best_score)
+
+    ftma_results.append({
+        "Row_Index": idx,
+        "V_oc_opt": best_solution[0],
+        "I_sc_opt": best_solution[1],
+        "G_theta": solar_series['G_theta'],
+        "T": solar_series['T'],
+        "v": wind_series['v'],
+        "D": wind_series['D'],
+        "H": wind_series['H'],
+        "L": wind_series['L'],
+        "Max_P_TOTAL": -best_score
+    })
+
+    print(f"[Row {idx}] → V_oc*: {best_solution[0]:.2f}, I_sc*: {best_solution[1]:.2f} | "
+          f"G_theta: {solar_series['G_theta']}, T: {solar_series['T']} | "
+          f"v: {wind_series['v']}, D: {wind_series['D']}, H: {wind_series['H']}, L: {wind_series['L']} "
+          f"→ Max P_TOTAL: {-best_score:.2f} W")
+
+    convergence_data.append(curve)
+
+# Save results
+ftma_df = pd.DataFrame(ftma_results)
+ftma_df.to_csv("ftma_optimization_results.csv", index=False)
+ftma_df.to_excel("ftma_optimization_results.xlsx", index=False)
+
+# Plot convergence
+average_curve = np.mean(convergence_data, axis=0)
+epsilon = 1e-3
+converged_at = len(average_curve) - 1
+for i in range(1, len(average_curve)):
+    if abs(average_curve[i] - average_curve[i - 1]) < epsilon:
+        converged_at = i
+        break
+
+plt.figure(figsize=(10, 6))
+plt.plot(average_curve, label='Average FTMA Convergence', linewidth=2)
+plt.axvline(x=converged_at, color='red', linestyle='--', label=f'Converged at Iteration {converged_at}')
+plt.text(converged_at + 2, average_curve[converged_at], f'Iteration {converged_at}', color='red', fontsize=10)
+plt.title("Average FTMA Convergence Over Dataset")
+plt.xlabel("Iteration")
+plt.ylabel("Total Power Output (W)")
+plt.grid(True)
+plt.legend()
+plt.tight_layout()
+plt.savefig("ftma_SW1.svg", format="svg")
+plt.show()
