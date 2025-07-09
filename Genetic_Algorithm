@@ -1,0 +1,142 @@
+import pandas as pd
+import numpy as np
+import random
+import matplotlib.pyplot as plt
+
+# Load datasets
+solar_df = pd.read_csv("E:/Solar and Wind Integration/Third paper/solar_panel_power_output.csv")
+wind_df = pd.read_csv("E:/Solar and Wind Integration/Third paper/wind_turbine_output.csv")
+
+# Constants
+T_ref, G_ref, R, r_s = 25, 1000, 0.700, 18.15
+k_V, k_I, eta, rho = -0.24, 0.04, 0.3, 1.225
+
+# Objective Functions
+def P_SOLAR(V_oc, I_sc, G_theta, T):
+    V_adj = V_oc - k_V * (T - T_ref)
+    I_adj = I_sc * (G_theta / G_ref) * (1 + k_I * (T - T_ref))
+    return V_adj * I_adj * (R / (R + r_s))
+
+def P_WIND(v, D, H, L):
+    return 4 * eta * 0.5 * rho * (v**3) * D * (H - (L / 2))
+
+def P_TOTAL(position: np.ndarray, solar_row, wind_row) -> float:
+    V_oc, I_sc = position[0], position[1]
+    G_theta, T = solar_row['G_theta'], solar_row['T']
+    v, D, H, L = wind_row['v'], wind_row['D'], wind_row['H'], wind_row['L']
+    return -1 * (P_SOLAR(V_oc, I_sc, G_theta, T) + P_WIND(v, D, H, L))  # Negated for minimization
+
+# GA Parameters
+bounds = [(70, 100), (1, 20)]
+pop_size = 20
+n_generations = 100
+mutation_rate = 0.1
+crossover_rate = 0.9
+tournament_size = 3
+
+# GA functions
+def tournament_selection(pop, fitness):
+    best = None
+    for _ in range(tournament_size):
+        idx = random.randint(0, len(pop) - 1)
+        if best is None or fitness[idx] < fitness[best]:
+            best = idx
+    return pop[best].copy()
+
+def crossover(parent1, parent2):
+    if random.random() > crossover_rate:
+        return parent1.copy(), parent2.copy()
+    alpha = np.random.rand(len(parent1))
+    child1 = alpha * parent1 + (1 - alpha) * parent2
+    child2 = alpha * parent2 + (1 - alpha) * parent1
+    return child1, child2
+
+def mutate(individual):
+    for i in range(len(individual)):
+        if random.random() < mutation_rate:
+            individual[i] = random.uniform(*bounds[i])
+    return np.clip(individual, [b[0] for b in bounds], [b[1] for b in bounds])
+
+# Storage
+ga_results = []
+convergence_data = []
+
+for idx, (solar_row, wind_row) in enumerate(zip(solar_df.itertuples(index=False), wind_df.itertuples(index=False))):
+    solar_series = pd.Series(solar_row._asdict())
+    wind_series = pd.Series(wind_row._asdict())
+
+    # Initialize population
+    population = [np.array([random.uniform(*bounds[0]), random.uniform(*bounds[1])]) for _ in range(pop_size)]
+    fitness = [P_TOTAL(ind, solar_series, wind_series) for ind in population]
+
+    curve = []
+
+    for _ in range(n_generations):
+        new_population = []
+        sorted_indices = np.argsort(fitness)
+        best_ind = population[sorted_indices[0]].copy()
+        best_fit = fitness[sorted_indices[0]]
+        new_population.append(best_ind)  # Elitism
+
+        while len(new_population) < pop_size:
+            p1 = tournament_selection(population, fitness)
+            p2 = tournament_selection(population, fitness)
+            c1, c2 = crossover(p1, p2)
+            new_population.append(mutate(c1))
+            if len(new_population) < pop_size:
+                new_population.append(mutate(c2))
+
+        population = new_population
+        fitness = [P_TOTAL(ind, solar_series, wind_series) for ind in population]
+
+        best_idx = np.argmin(fitness)
+        best_ind = population[best_idx]
+        best_fit = fitness[best_idx]
+        curve.append(-best_fit)
+
+    ga_results.append({
+        "Row_Index": idx,
+        "V_oc_opt": best_ind[0],
+        "I_sc_opt": best_ind[1],
+        "G_theta": solar_series['G_theta'],
+        "T": solar_series['T'],
+        "v": wind_series['v'],
+        "D": wind_series['D'],
+        "H": wind_series['H'],
+        "L": wind_series['L'],
+        "Max_P_TOTAL": -best_fit
+    })
+
+    print(f"[Row {idx}] → V_oc*: {best_ind[0]:.2f}, I_sc*: {best_ind[1]:.2f} | "
+          f"G_theta: {solar_series['G_theta']}, T: {solar_series['T']} | "
+          f"v: {wind_series['v']}, D: {wind_series['D']}, H: {wind_series['H']}, L: {wind_series['L']} "
+          f"→ Max P_TOTAL: {-best_fit:.2f} W")
+
+    convergence_data.append(curve)
+
+# Save results
+ga_df = pd.DataFrame(ga_results)
+ga_df.to_csv("ga_optimization_results.csv", index=False)
+ga_df.to_excel("ga_optimization_results.xlsx", index=False)
+
+# Convergence plot
+average_curve = np.mean(convergence_data, axis=0)
+epsilon = 1e-3
+converged_at = len(average_curve) - 1
+for i in range(1, len(average_curve)):
+    if abs(average_curve[i] - average_curve[i - 1]) < epsilon:
+        converged_at = i
+        break
+
+plt.figure(figsize=(10, 6))
+plt.plot(average_curve, label='Average GA Convergence', linewidth=2)
+plt.axvline(x=converged_at, color='red', linestyle='--', label=f'Converged at Iteration {converged_at}')
+plt.text(converged_at + 2, average_curve[converged_at], f'Iteration {converged_at}', color='red', fontsize=10)
+plt.title("Average Genetic Algorithm Convergence")
+plt.xlabel("Iteration")
+plt.ylabel("Total Power Output (W)")
+plt.grid(True)
+plt.legend()
+plt.tight_layout()
+plt.savefig("ga_SW1.svg", format="svg")
+plt.show()
